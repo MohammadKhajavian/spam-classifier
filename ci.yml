@@ -1,0 +1,104 @@
+# =============================================================================
+# .github/workflows/ci.yml
+# PURPOSE : Automatically test, build, and push Docker image on every push.
+# LOCATION: Must be saved at exactly this path: .github/workflows/ci.yml
+# WEEK    : Weeks 5–6 — CI/CD pipeline
+# =============================================================================
+# HOW IT CONNECTS TO OTHER FILES:
+#   - Runs: python train.py        (Week 1 — produces model.pkl)
+#   - Runs: pytest test_api.py     (Week 5 — must pass before Docker build)
+#   - Runs: docker build           (Week 3 — builds your Dockerfile)
+#   - Pushes image to Docker Hub   (Week 4 — uses your registry credentials)
+#   - Smoke tests: curl /health    (Week 2 — checks FastAPI endpoint is live)
+# =============================================================================
+
+name: CI/CD pipeline
+
+# ── When to run ───────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [main]        # run on every push to main
+  pull_request:
+    branches: [main]        # also run on pull requests to main
+
+# ── Job 1: Run tests ──────────────────────────────────────────────────────────
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest  # use a fresh Ubuntu VM in GitHub's cloud
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4   # downloads your repo to the VM
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model to produce model.pkl
+        # train.py reads data/spam_data.csv and writes model.pkl
+        # model.pkl must exist before pytest can import main.py
+        run: python train.py
+
+      - name: Run pytest
+        # If any test in test_api.py fails, this step fails.
+        # When this step fails, the whole job fails.
+        # The next job (build-and-push) only runs if this job passes.
+        run: pytest test_api.py -v
+
+  # ── Job 2: Build and push Docker image ──────────────────────────────────────
+  build-and-push:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    needs: test   # ONLY runs if the 'test' job above passed
+
+    # Only push to Docker Hub on direct pushes to main (not on pull requests)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python and train model
+        # Need model.pkl again in this fresh VM — Docker build copies it
+        run: |
+          pip install -r requirements.txt
+          python train.py
+
+      - name: Log in to Docker Hub
+        # DOCKER_USERNAME and DOCKER_PASSWORD are GitHub Secrets.
+        # How to add them:
+        #   1. Go to your GitHub repo
+        #   2. Settings > Secrets and variables > Actions
+        #   3. Click "New repository secret"
+        #   4. Add DOCKER_USERNAME (your Docker Hub username)
+        #   5. Add DOCKER_PASSWORD (your Docker Hub password or access token)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push image to Docker Hub
+        # Builds your Dockerfile and pushes to: yourusername/spam-classifier:latest
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/spam-classifier:latest
+
+      - name: Smoke test — verify the container starts and /health responds
+        # Pull the image we just pushed, run it, wait 5 seconds, then curl /health
+        # If /health returns anything other than 200, curl --fail exits with error
+        # and this step (and the whole pipeline) fails.
+        run: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/spam-classifier:latest
+          docker run -d -p 8000:8000 --name smoketest \
+            ${{ secrets.DOCKER_USERNAME }}/spam-classifier:latest
+          sleep 5
+          curl --fail http://localhost:8000/health || exit 1
+          echo "Smoke test passed!"
+          docker stop smoketest
