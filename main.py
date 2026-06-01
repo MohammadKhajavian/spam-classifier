@@ -50,11 +50,14 @@ def predict(request: PredictRequest):
         )
 
     # Pipeline handles vectorizing + predicting in one step
+    # label is returned as original string: 'spam' or 'ham'
     prediction = model.predict([request.text])[0]
     proba = model.predict_proba([request.text])[0]
     confidence = float(np.max(proba))
 
-    label = "spam" if prediction == 1 else "ham"
+    # prediction is already 'spam' or 'ham' string — no number conversion needed
+    label = str(prediction)
+
     message = (
         f"This message looks like spam ({confidence:.0%} confidence)."
         if label == "spam"
